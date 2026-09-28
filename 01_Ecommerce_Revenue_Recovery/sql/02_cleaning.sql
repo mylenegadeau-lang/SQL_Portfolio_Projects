@@ -1,4 +1,3 @@
-
 /*******************************************************************************
   Project: E-Commerce Revenue Recovery & Conversion Optimization
   File: 02_cleaning.sql
@@ -10,6 +9,10 @@
   It extracts the fields needed for the project, converts nested data
   into a simpler structure, handles missing values, and creates staging
   tables that will be used for the data model and business analysis.
+
+  The cleaning process creates two main tables:
+  1. cleaned_events      → event-level information
+  2. cleaned_event_items → product-level information
 *******************************************************************************/
 
 
@@ -17,112 +20,135 @@
 -- SECTION 1: CLEAN EVENT DATA
 -- =============================================================================
 
--- Create a cleaned event-level table.
--- The raw GA4 data contains nested fields, so this step extracts the
--- information needed for the analysis into separate columns.
+-- 1.1 Create the cleaned event-level table.
+--
+-- Business Question:
+-- What event-level information do we need for the analysis?
+--
+-- The raw GA4 data contains nested device, geography, and ecommerce fields.
+-- This step extracts the required information into separate columns so that
+-- the event data is easier to analyze.
+--
+-- Important:
+-- This step mainly selects and structures the required fields.
+-- It does not perform extensive transformations such as deduplication.
 
-CREATE OR REPLACE TABLE `e-commerce-revenue-recovery.ecommerce_analytics.cleaned_events` AS
+
+CREATE OR REPLACE TABLE
+  `e-commerce-revenue-recovery.ecommerce_analytics.cleaned_events` AS
 
 SELECT
-  -- Convert the GA4 date from YYYYMMDD text into a proper DATE
+
+  -- Convert GA4 date from YYYYMMDD text into a proper DATE
   PARSE_DATE('%Y%m%d', event_date) AS event_date,
 
+  -- Event information
   event_timestamp,
   event_name,
+
+  -- User information
   user_pseudo_id,
+  user_id,
 
-  -- Extract device and country information
+  -- Platform information
+  platform,
+
+  -- Device information
   device.category AS device_category,
+  device.operating_system AS operating_system,
+  device.web_info.browser AS browser,
+
+  -- Geographic information
   geo.country AS country,
+  geo.city AS city,
 
-  -- Extract the traffic source and medium
-  traffic_source.name AS traffic_source,
-  traffic_source.medium AS traffic_medium,
+  -- Ecommerce transaction information
+  ecommerce.transaction_id AS transaction_id,
+  ecommerce.purchase_revenue AS purchase_revenue,
 
-  -- Extract the transaction ID from the nested event parameters
-  (
-    SELECT value.string_value
-    FROM UNNEST(event_params)
-    WHERE key = 'transaction_id'
-  ) AS transaction_id,
-
-  -- Extract purchase value and handle different numeric data types
-  (
-    SELECT COALESCE(
-      value.double_value,
-      CAST(value.int_value AS FLOAT64)
-    )
-    FROM UNNEST(event_params)
-    WHERE key = 'value'
-  ) AS purchase_revenue
+  -- Event-level ecommerce summary fields
+  ecommerce.total_item_quantity AS total_item_quantity,
+  ecommerce.unique_items AS unique_items
 
 FROM
   `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
 
--- Only keep records that can be linked to a user
+-- Keep records that can be associated with a user
 WHERE
   user_pseudo_id IS NOT NULL;
 
 
 -- =============================================================================
--- SECTION 2: CLEAN PRODUCT DATA
+-- SECTION 2: CLEAN PRODUCT ITEM DATA
 -- =============================================================================
 
--- Create a product-level staging table.
--- GA4 stores purchased and viewed products inside a nested items array.
--- UNNEST is used to turn those nested items into individual rows.
+-- 2.1 Create the product-level event table.
+--
+-- Business Question:
+-- How can we extract individual products from the nested GA4 items array?
+--
+-- GA4 stores product information inside a nested "items" array.
+-- UNNEST() converts each product item into its own row.
+--
+-- This creates a separate product-level table that can be used for:
+-- - product views
+-- - add-to-cart analysis
+-- - checkout analysis
+-- - purchase analysis
+-- - product revenue analysis
 
-CREATE OR REPLACE TABLE `e-commerce-revenue-recovery.ecommerce_analytics.cleaned_product_events` AS
+
+CREATE OR REPLACE TABLE
+  `e-commerce-revenue-recovery.ecommerce_analytics.cleaned_event_items` AS
 
 SELECT
-  PARSE_DATE('%Y%m%d', e.event_date) AS event_date,
-  e.event_timestamp,
-  e.event_name,
-  e.user_pseudo_id,
 
-  -- Extract the transaction ID from the event parameters
-  (
-    SELECT value.string_value
-    FROM UNNEST(e.event_params)
-    WHERE key = 'transaction_id'
-  ) AS transaction_id,
+  -- Event information
+  PARSE_DATE('%Y%m%d', event_date) AS event_date,
+  event_timestamp,
+  event_name,
 
-  -- Product information from the nested items array
-  item.item_id AS product_id,
-  item.item_name AS product_name,
-  item.price AS item_price,
+  -- User information
+  user_pseudo_id,
 
-  -- If quantity is missing, assume one unit
-  COALESCE(item.quantity, 1) AS quantity,
-
-  -- Use the recorded item revenue when available.
-  -- Otherwise, calculate it using price × quantity.
-  COALESCE(
-    item.item_revenue,
-    item.price * COALESCE(item.quantity, 1)
-  ) AS item_revenue
+  -- Product information
+  items.item_id AS item_id,
+  items.item_name AS item_name,
+  items.quantity AS quantity,
+  items.price AS price
 
 FROM
-  `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*` e,
-
-  -- Flatten the nested product items
-  UNNEST(e.items) AS item
+  `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`,
+  UNNEST(items) AS items
 
 WHERE
-  e.user_pseudo_id IS NOT NULL
+  user_pseudo_id IS NOT NULL
 
-  -- Keep only records with a usable product ID
-  AND item.item_id IS NOT NULL
-  AND item.item_id != '(not set)';
+  -- Keep only the main ecommerce events used in the project
+  AND event_name IN (
+    'view_item',
+    'add_to_cart',
+    'begin_checkout',
+    'purchase'
+  )
+
+  -- Remove product records without a usable product name
+  AND items.item_name IS NOT NULL
+  AND items.item_name != '(not set)';
 
 
 -- =============================================================================
 -- SECTION 3: DATA QUALITY CHECKS
 -- =============================================================================
 
+
 -- 3.1 Check for missing user IDs
--- Question: Did any records with a NULL user ID make it into the cleaned table?
--- The expected result should be 0.
+--
+-- Question:
+-- Did any records with a NULL user ID make it into the cleaned event table?
+--
+-- Expected result: 0
+
 
 SELECT
   COUNT(*) AS null_user_count
@@ -132,9 +158,37 @@ WHERE
   user_pseudo_id IS NULL;
 
 
--- 3.2 Check for repeated purchase transaction IDs
--- Question: Are any purchase transaction IDs appearing more than once?
+-- =============================================================================
+-- 3.2 Check for missing product names
+-- =============================================================================
+
+-- Question:
+-- Did any product records without a valid product name make it
+-- into the cleaned product-level table?
+--
+-- Expected result: 0
+
+
+SELECT
+  COUNT(*) AS invalid_product_name_count
+FROM
+  `e-commerce-revenue-recovery.ecommerce_analytics.cleaned_event_items`
+WHERE
+  item_name IS NULL
+  OR item_name = '(not set)';
+
+
+-- =============================================================================
+-- 3.3 Check for repeated purchase transaction IDs
+-- =============================================================================
+
+-- Question:
+-- Are any purchase transaction IDs appearing more than once?
+--
 -- This helps identify possible duplicate purchase records.
+--
+-- An empty result means that no repeated transaction IDs were found.
+
 
 SELECT
   transaction_id,
@@ -149,3 +203,4 @@ GROUP BY
 HAVING
   COUNT(*) > 1;
 ```
+

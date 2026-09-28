@@ -56,21 +56,15 @@ ORDER BY
 -- purchasing process?
 -- These events will later be used to measure conversion and drop-off.
 
-SELECT
-  event_name,
-  COUNT(*) AS event_count
-FROM
-  `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
-WHERE
-  event_name IN ('view_item', 'add_to_cart', 'begin_checkout', 'purchase')
-GROUP BY
-  event_name
-ORDER BY
-  CASE event_name
-    WHEN 'view_item' THEN 1
-    WHEN 'add_to_cart' THEN 2
-    WHEN 'begin_checkout' THEN 3
-    WHEN 'purchase' THEN 4
+SELECT event_name, COUNT(*) AS event_count 
+FROM bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_* 
+WHERE event_name IN ('view_item', 'add_to_cart', 'begin_checkout', 'purchase') 
+GROUP BY event_name 
+ORDER BY 
+  CASE event_name 
+    WHEN 'view_item' THEN 1 
+    WHEN 'add_to_cart' THEN 2 WHEN 'begin_checkout' THEN 3 
+    WHEN 'purchase' THEN 4 
   END;
 
 
@@ -79,22 +73,35 @@ ORDER BY
 -- =============================================================================
 
 -- 3.1 Purchase and Transaction Data Check
--- Question: Do purchase events have transaction IDs and revenue information?
+-- Question: Do purchase events contain transaction IDs and revenue information?
 -- This check helps identify missing or incomplete purchase records.
 
 SELECT
-  COUNT(*) AS total_purchases,
-  COUNT(DISTINCT event_params.value.string_value) AS unique_transactions,
-  COUNTIF(
-    event_params.key = 'value'
-    AND event_params.value.double_value IS NULL
-  ) AS missing_revenue_records
+COUNT(*) AS total_purchase_events,
+
+COUNTIF(
+ecommerce.transaction_id IS NOT NULL
+) AS purchases_with_transaction_id,
+
+COUNTIF(
+ecommerce.transaction_id IS NULL
+) AS purchases_without_transaction_id,
+
+COUNTIF(
+ecommerce.purchase_revenue IS NOT NULL
+) AS purchases_with_revenue,
+
+COUNTIF(
+ecommerce.purchase_revenue IS NULL
+) AS purchases_without_revenue
+
 FROM
-  `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`,
-  UNNEST(event_params) AS event_params
+`bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+
 WHERE
-  event_name = 'purchase'
-  AND event_params.key = 'transaction_id';
+event_name = 'purchase';
+
+
 
 
 -- =============================================================================
@@ -114,7 +121,12 @@ FROM
   `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`,
   UNNEST(items) AS item
 WHERE
-  event_name IN ('view_item', 'add_to_cart', 'purchase')
+  event_name IN (
+    'view_item',
+    'add_to_cart',
+    'begin_checkout',
+    'purchase'
+  )
 GROUP BY
   event_name;
 ```
